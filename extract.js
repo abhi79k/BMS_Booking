@@ -32,7 +32,7 @@ export function extractInitialState(html) {
   }
 }
 
-function* walk(node, depth = 0) {
+export function* walk(node, depth = 0) {
   if (!node || typeof node !== 'object' || depth > 40) return;
   yield node;
   for (const value of Array.isArray(node) ? node : Object.values(node)) {
@@ -71,17 +71,26 @@ function readDateStrip(payload) {
   return dates;
 }
 
-/**
- * @param state    parsed window.__INITIAL_STATE__
- * @param dateStrs "YYYYMMDD" dates to report on
- */
-export function analyseState(state, dateStrs) {
+/** The showtimes payload inside the page state, or why it is not there. */
+export function showtimesPayload(state) {
   const queries = state?.showtimesFunctionalApi?.queries ?? {};
   const key = Object.keys(queries).find((k) => k.includes('fetchPrimaryDynamic'));
   if (!key) return { ok: false, reason: 'no showtimes query in page state' };
 
   const payload = queries[key]?.data?.data;
   if (!payload) return { ok: false, reason: 'showtimes query has no payload' };
+
+  return { ok: true, payload };
+}
+
+/**
+ * @param state    parsed window.__INITIAL_STATE__
+ * @param dateStrs "YYYYMMDD" dates to report on
+ */
+export function analyseState(state, dateStrs) {
+  const found = showtimesPayload(state);
+  if (!found.ok) return found;
+  const payload = found.payload;
 
   const strip = readDateStrip(payload);
   if (strip.size === 0) {
@@ -103,8 +112,137 @@ export function analyseState(state, dateStrs) {
 
   return {
     ok: true,
+    payload,
+    selectedDate: readSelectedDate(payload),
     stripRange: [...strip.keys()].sort(),
     stripOnSale: [...strip.values()].filter((c) => c.onSale).map((c) => c.dateCode),
     results
   };
+}
+
+// --- showtimes ---------------------------------------------------------------
+//
+// Reading the showtime list is a different job from reading the date strip, and
+// a more delicate one. Point 2 at the top of this file is the constraint that
+// shapes all of it: the embedded showtime list is *today's* schedule whatever
+// date the URL asks for. So a showtime read out of the page state can only be
+// trusted for the date the page state says is selected, and the seat check has
+// to check that before it recommends anything.
+
+/** Which date's schedule is embedded, as YYYYMMDD, if the state admits it. */
+export function readSelectedDate(payload) {
+  for (const node of walk(payload)) {
+    if (typeof node.id !== 'string' || !DATE_ID.test(node.id)) continue;
+    const selected = node.isSelected === true || node.selected === true ||
+      /selected/i.test(typeof node.styleId === 'string' ? node.styleId : '');
+    if (selected) return node.id;
+  }
+  return undefined;
+}
+
+/**
+ * "07:30 PM", "7:30PM", "19:30" -> minutes after midnight. Returns undefined
+ * for anything that is not a clock time, which is most strings in the payload.
+ */
+export function parseClockTime(value) {
+  const m = /^\s*(\d{1,2})[:.](\d{2})\s*(AM|PM)?\s*$/i.exec(String(value ?? ''));
+  if (!m) return undefined;
+  let h = Number(m[1]);
+  const min = Number(m[2]);
+  if (min > 59) return undefined;
+  const suffix = m[3]?.toUpperCase();
+  if (suffix) {
+    if (h < 1 || h > 12) return undefined;
+    if (h === 12) h = 0;
+    if (suffix === 'PM') h += 12;
+  } else if (h > 23) {
+    return undefined;
+  }
+  return h * 60 + min;
+}
+
+export const clockLabel = (minutes) => {
+  const h24 = Math.floor(minutes / 60) % 24;
+  const m = String(minutes % 60).padStart(2, '0');
+  const suffix = h24 < 12 ? 'AM' : 'PM';
+  const h = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h}:${m} ${suffix}`;
+};
+
+const TIME_KEYS = ['showtime', 'showTime', 'time', 'showTimeLabel', 'startTime',
+                   'title', 'text', 'label'];
+const SESSION_KEYS = ['sessionId', 'showTimeCode', 'sessionCode', 'showId',
+                      'showTimeId', 'ssid'];
+const VENUE_KEYS = ['venueName', 'venue', 'cinemaName', 'theatreName'];
+
+/**
+ * Every showtime in the payload, matched on shape: a node carrying something
+ * that parses as a clock time, plus a session id or a cta to click. The venue
+ * comes from the nearest ancestor that names one, because showtimes are nested
+ * under their cinema rather than carrying its name.
+ */
+export function readShowtimes(payload) {
+  const shows = [];
+  const seen = new Set();
+
+  const visit = (node, venue, depth = 0) => {
+    if (!node || typeof node !== 'object' || depth > 40) return;
+
+    const named = VENUE_KEYS.map((k) => node[k]).find((v) => typeof v === 'string' && v.trim());
+    const here = named ? named.trim() : venue;
+
+    if (!Array.isArray(node)) {
+      let minutes;
+      for (const k of TIME_KEYS) {
+        minutes = parseClockTime(node[k]);
+        if (minutes !== undefined) break;
+      }
+      const session = SESSION_KEYS.map((k) => node[k] ?? node.cta?.meta?.[k] ?? node.meta?.[k])
+        .find((v) => v !== undefined && v !== null && v !== '');
+      const url = typeof node.cta?.url === 'string' ? node.cta.url
+        : typeof node.url === 'string' ? node.url : undefined;
+      const isShow = minutes !== undefined &&
+        (session !== undefined || /show/i.test(String(node.cta?.type ?? node.styleId ?? '')));
+
+      if (isShow) {
+        const key = `${here || ''}|${minutes}|${session ?? url ?? ''}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          shows.push({
+            minutes,
+            label: clockLabel(minutes),
+            venue: here,
+            sessionId: session !== undefined ? String(session) : undefined,
+            url,
+            // Sold-out shows are still listed; do not send anyone to one.
+            soldOut: /sold|unavailable|disabled/i.test(
+              String(node.styleId ?? node.status ?? node.availabilityStatus ?? ''))
+          });
+        }
+      }
+    }
+
+    for (const value of Array.isArray(node) ? node : Object.values(node)) {
+      visit(value, here, depth + 1);
+    }
+  };
+
+  visit(payload, undefined, 0);
+  return shows.sort((a, b) => a.minutes - b.minutes);
+}
+
+/**
+ * The show closest to `targetMinutes`, within `windowMinutes` either side.
+ * Ties go to the earlier show: if 7:15 and 7:45 are equally close to 7:30, the
+ * one that has not started yet by the time you have booked is the earlier one.
+ */
+export function pickShowNearest(shows, targetMinutes, windowMinutes = 45) {
+  const usable = shows.filter((s) => !s.soldOut &&
+    Math.abs(s.minutes - targetMinutes) <= windowMinutes);
+  if (usable.length === 0) return undefined;
+  return usable.reduce((best, s) => {
+    const d = Math.abs(s.minutes - targetMinutes);
+    const bd = Math.abs(best.minutes - targetMinutes);
+    return d < bd || (d === bd && s.minutes < best.minutes) ? s : best;
+  });
 }

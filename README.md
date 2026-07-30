@@ -2,7 +2,8 @@
 
 I built this to avoid repeatedly refreshing BookMyShow while waiting for tickets
 to open. It watches a chosen movie, city, and format page, then emails me when
-one of the dates I care about becomes bookable.
+one of the dates I care about becomes bookable — and, when it can, tells me
+which seats to book.
 
 It is a notification tool only. It does not log in, reserve seats, add anything
 to a cart, or complete a booking.
@@ -20,13 +21,57 @@ When a watched date opens:
 - it records that alert in state.json, so the same date is not emailed again;
 - if the date later disappears, its alert is re-armed.
 
+### The seat recommendation
+
+When a watched date is on sale, the checker goes one step further than "it is
+open". It finds the show nearest SHOW_TIME (7:30 pm by default), opens that
+show's seat map, and works out where SEATS people can sit **next to each other**
+with the best view. The alert then reads:
+
+~~~
+IMAX OPEN - The Odyssey, Monday, 3 August 2026 - Row H seats H11-H12
+
+Best 2 seats together:
+  1. Row H, seats H11-H12 (Rs 250 each)
+     62% of the way back, dead centre - GOLD
+  2. Row J, seats J11-J12 (Rs 250 each)
+     73% of the way back, dead centre - GOLD
+
+Availability: 142 of 240 seats free (59%), 14 rows.
+~~~
+
+"Best" means as close as possible to the sweet spot for a large-format screen:
+about 62% of the way back from the screen (SEAT_IDEAL_ROW) and centred in the
+hall. Rows in front of the sweet spot are penalised harder than rows behind it,
+and being off-centre sideways costs more than being a row out. Seats separated
+by an aisle are never offered as "together", even when their numbers run
+straight through it.
+
+Two limits are worth knowing before you rely on it:
+
+- **It reads the seat map, so it can only report what the map says.** A layout
+  that needs a login, or a show not yet open for seat selection, produces an
+  alert that says exactly that instead of a recommendation. The date alert
+  itself is never held up by a seat check that fails.
+- **Seats can normally only be read for the current day.** BookMyShow embeds
+  only the currently selected day's schedule in the page, so a date that opens
+  a week out is alerted immediately, and its seats are reported once that day
+  arrives (the checker sends a short follow-up email at that point). The
+  checker attempts the site's own showtimes API for a future date and reports
+  honestly when that is refused, which it usually is for automated clients.
+
+Set the SEAT_CHECK variable to 0 to skip all of this and alert on the date
+opening only.
+
 The workflow also detects when it cannot reliably read the page (for example, a
 Cloudflare block or a page-layout change). After three consecutive failed runs,
 it sends a separate failure email and uploads the returned HTML and screenshot
 as a GitHub Actions artifact.
 
-The checker makes one BookMyShow page request per run. Please keep the cadence
-reasonable and comply with BookMyShow's terms and policies.
+The checker makes one BookMyShow page request per run, plus - only when a
+watched date is on sale and still needs a seat recommendation - the requests
+one seat map costs. It reads at most one seat map per run. Please keep the
+cadence reasonable and comply with BookMyShow's terms and policies.
 
 ## Use your own copy
 
@@ -68,6 +113,12 @@ add the following values.
 | WATCH_WEEKDAY   | No       | Weekday to watch, such as monday or friday. Names and 0–6 (0 is Sunday) work. Default: monday. |
 | DATES_TO_CHECK  | No       | Number of upcoming matching weekdays to watch. Default: 2. |
 | STOP            | No       | A non-empty value pauses every run. Delete the variable to resume; STOP=0 also pauses it. |
+| SEATS           | No       | How many seats together to look for. Default: 2. |
+| SHOW_TIME       | No       | Which show to read seats for: 19:30 or 7:30 PM. Default: 19:30. |
+| SHOW_TIME_WINDOW| No       | How many minutes from SHOW_TIME still counts as that show. Default: 45. |
+| SEAT_CHECK      | No       | Set to 0 to alert on the date opening only, with no seat check. Default: on. |
+| SEAT_IDEAL_ROW  | No       | Where the sweet spot is: 0 is the front row, 1 the back. Default: 0.62. |
+| SEAT_OPTIONS    | No       | How many alternative blocks of seats to list. Default: 3. |
 
 Use either WATCH_DATES or the weekday settings:
 
@@ -232,6 +283,16 @@ npm run check:local
 ~~~
 
 .env is ignored by Git. Keep it that way.
+
+The seat picker has its own tests, which need neither a network nor a browser:
+
+~~~bash
+npm test
+~~~
+
+They cover which seats count as "together" (including across an aisle), which
+block of seats wins, how the statuses in a BookMyShow layout are read, and how
+the ~7:30 pm show is chosen.
 
 The local-only tuning values in .env.example are:
 
