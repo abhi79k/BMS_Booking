@@ -225,8 +225,12 @@ export function readShowtimes(payload) {
             sessionId: session !== undefined ? String(session) : undefined,
             url,
             // Sold-out shows are still listed; do not send anyone to one.
+            // Every field is searched, not the first one that happens to be
+            // set: a show with an ordinary styleId and status "SOLD_OUT" would
+            // otherwise read as bookable, which is the wrong way to be wrong.
             soldOut: /sold|unavailable|disabled/i.test(
-              String(node.styleId ?? node.status ?? node.availabilityStatus ?? ''))
+              [node.styleId, node.status, node.availabilityStatus]
+                .filter((v) => typeof v === 'string').join(' '))
           });
         }
       }

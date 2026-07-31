@@ -226,10 +226,17 @@ export function buildLayout(records, { rowOrder = 'auto' } = {}) {
 
   const geometric = seats.length > 0 && seats.every((s) => s.x !== undefined && s.y !== undefined);
 
-  // Rows come from the row label when there is one. When the layout only gives
-  // coordinates, seats within ~60% of a seat's height of each other are one row.
+  // Rows come from the row label only when *every* seat has one. A half
+  // labelled map is the normal case for a map read off the screen - the reader
+  // finds a row's letter only where the hall draws one - and grouping those by
+  // label would tip every unlabelled row into a single '?' row spanning the
+  // auditorium. Seats in different rows would then sit next to each other in
+  // that row's seat list, and "two together" could mean two seats ten metres
+  // apart. Coordinates settle it whenever they are there; a label that turns
+  // up inside a cluster is then only used to name it.
   const groups = new Map();
-  if (seats.some((s) => s.rowLabel)) {
+  const allLabelled = seats.length > 0 && seats.every((s) => s.rowLabel);
+  if (allLabelled || (!geometric && seats.some((s) => s.rowLabel))) {
     for (const s of seats) {
       const key = s.rowLabel || '?';
       if (!groups.has(key)) groups.set(key, []);
@@ -256,7 +263,9 @@ export function buildLayout(records, { rowOrder = 'auto' } = {}) {
       return compareRowLabels(a.label, b.label);
     });
     return {
-      label,
+      // A cluster keeps the row letter of any seat in it that carries one, so
+      // the email can still say "Row H" rather than "row 8 from the screen".
+      label: ordered.find((s) => s.rowLabel)?.rowLabel ?? label,
       seats: ordered,
       y: median(ordered.map((s) => s.y).filter((v) => v !== undefined)),
       category: ordered.find((s) => s.category)?.category
@@ -271,6 +280,24 @@ export function buildLayout(records, { rowOrder = 'auto' } = {}) {
   if (rowOrder === 'back-first') rows.reverse();
 
   rows.forEach((r, i) => { r.index = i; });     // 0 = nearest the screen
+
+  // A map drawn without seat numbers - an SVG grid of plain rectangles is the
+  // usual culprit - leaves seats with a position and no name, and an email
+  // reading "seats ?, ?" helps nobody. Number them from the left of their row.
+  // Adjacency still comes from the coordinates, so a counted number never
+  // bridges an aisle; it is a label, not a claim about the hall's numbering.
+  let countedNumbers = false;
+  for (const row of rows) {
+    row.seats.forEach((s, i) => {
+      if (s.number !== undefined) return;
+      s.number = i + 1;
+      s.col = s.col ?? i + 1;
+      if (s.label === '?' || s.label === '') {
+        s.label = String(i + 1);
+        countedNumbers = true;
+      }
+    });
+  }
 
   const all = rows.flatMap((r) => r.seats);
   const available = all.filter((s) => s.status === AVAILABLE);
@@ -287,6 +314,7 @@ export function buildLayout(records, { rowOrder = 'auto' } = {}) {
   return {
     rows,
     geometric,
+    countedNumbers,
     rowCount: rows.length,
     total: all.length,
     available: available.length,
@@ -479,6 +507,7 @@ export function recommendSeats(layout, count, { scoring, limit = 3 } = {}) {
       available: layout.available,
       unknown: layout.unknown,
       rowCount: layout.rowCount,
+      countedNumbers: layout.countedNumbers,
       categories: layout.categories
     }
   };
@@ -533,6 +562,10 @@ export function formatSeatReport(report, { showLabel, venue, seatUrl } = {}) {
   for (const c of summary.categories.slice(0, 6)) {
     lines.push(`  ${c.category}: ${c.available} of ${c.total} free` +
       (c.price !== undefined ? ` (Rs ${Math.round(c.price)})` : ''));
+  }
+  if (summary.countedNumbers) {
+    lines.push('  The map showed no seat numbers, so these are counted from the' +
+      ' left of the row as you face the screen.');
   }
   if (summary.unknown) {
     lines.push(`  ${summary.unknown} seat(s) had a status this checker could not read` +

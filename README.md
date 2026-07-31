@@ -73,10 +73,12 @@ Cloudflare block or a page-layout change). After three consecutive failed runs,
 it sends a separate failure email and uploads the returned HTML and screenshot
 as a GitHub Actions artifact.
 
-The checker makes one BookMyShow page request per run, plus - only when a
-watched date is on sale and still needs a seat recommendation - the requests
-one seat map costs. It reads at most one seat map per run. Please keep the
-cadence reasonable and comply with BookMyShow's terms and policies.
+Most runs make a single BookMyShow page request. A run only does more when a
+watched date is on sale and still needs a seat recommendation: it then also
+loads that date's page and, from there, one seat map. It never reads more than
+one seat map per run, and once a date's seats have been reported it stops
+asking. Please keep the cadence reasonable and comply with BookMyShow's terms
+and policies.
 
 ## Use your own copy
 
@@ -295,7 +297,8 @@ The seat picker has its own tests, which need neither a network nor a browser:
 npm test
 ~~~
 
-They cover which seats count as "together" (including across an aisle), which
+They cover which seats count as "together" (including the rule that an aisle
+splits a block, however the seats either side of it are numbered), which
 block of seats wins, how the statuses in a BookMyShow layout are read, and how
 the ~7:30 pm show is chosen.
 

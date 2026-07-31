@@ -218,6 +218,56 @@ test('a measured seat map with no labels still yields rows and a pick', () => {
   assert.ok(recommendSeats(layout, 2).blocks.length > 0);
 });
 
+test('a half-labelled map is still grouped into its real rows', () => {
+  // The rendered-map reader only finds a row's letter when the hall draws one,
+  // so a map can come back with some rows labelled and some not. Grouping by
+  // label would then tip every unlabelled row into one '?' row spanning the
+  // auditorium - and seats in different rows would read as neighbours.
+  const records = [];
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 6; c++) {
+      records.push({
+        label: String(c + 1),
+        rowLabel: r === 0 ? 'A' : undefined,     // only the front row is named
+        statusHint: 'seat _available',
+        x: 100 + c * 24,
+        y: 200 + r * 30
+      });
+    }
+  }
+
+  const layout = buildLayout(records);
+  assert.equal(layout.rowCount, 4, 'four physical rows, not two');
+  assert.equal(layout.rows[0].label, 'A', 'a named row keeps its name');
+  for (const row of layout.rows) assert.equal(row.seats.length, 6);
+
+  // Nothing recommended may straddle two rows.
+  for (const b of recommendSeats(layout, 3, { limit: 10 }).blocks) {
+    assert.equal(new Set(b.seats.map((s) => s.y)).size, 1,
+      `block ${b.labels} spans more than one row`);
+  }
+});
+
+test('a map with no seat numbers gets seats counted from the left', () => {
+  // An SVG grid of plain rectangles: positions, statuses, no text anywhere.
+  const records = [];
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 8; c++) {
+      records.push({ statusHint: 'seat _available', x: 40 + c * 30, y: 30 + r * 30 });
+    }
+  }
+
+  const layout = buildLayout(records);
+  assert.equal(layout.countedNumbers, true);
+  assert.equal(layout.available, 32);
+
+  const rec = recommendSeats(layout, 2);
+  assert.match(rec.blocks[0].labels, /^\d+-\d+$/, 'no "?, ?" in the email');
+
+  const text = formatSeatReport({ ok: true, recommendation: rec }, {}).join('\n');
+  assert.match(text, /counted from the left/);
+});
+
 test('seatRange collapses a run and spells out a broken one', () => {
   assert.equal(seatRange([{ label: 'H11', number: 11 }, { label: 'H12', number: 12 }]), 'H11-H12');
   assert.equal(seatRange([{ label: 'H11', number: 11 }, { label: 'H14', number: 14 }]), 'H11, H14');
@@ -306,6 +356,26 @@ test('the ~7:30 show is the nearest one, and sold-out shows are skipped', () => 
 
   // Nothing within the window is nothing, not "the least bad show of the day".
   assert.equal(pickShowNearest(shows, 15 * 60, 30), undefined);
+});
+
+test('a show marked sold out in any field is read as sold out', () => {
+  // The marker moves around: sometimes the styleId, sometimes a status beside
+  // it. A show whose styleId looks ordinary must not read as bookable just
+  // because that is the first field with something in it.
+  const payload = { widgets: [{ venueName: 'PVR IMAX', shows: [
+    { showTime: '07:30 PM', sessionId: 'A', styleId: 'showtime-default',
+      status: 'SOLD_OUT' },
+    { showTime: '07:40 PM', sessionId: 'B', styleId: 'showtime-default',
+      availabilityStatus: 'UNAVAILABLE' },
+    { showTime: '08:05 PM', sessionId: 'C', styleId: 'showtime-default',
+      status: 'AVAILABLE' }
+  ] }] };
+
+  const shows = readShowtimes(payload);
+  assert.deepEqual(shows.map((s) => s.soldOut), [true, true, false]);
+
+  // The nearest show to 7:30 is sold out, so the pick moves to the bookable one.
+  assert.equal(pickShowNearest(shows, 19 * 60 + 30, 45).label, '8:05 PM');
 });
 
 test('the selected date in the strip is what the embedded schedule belongs to', () => {

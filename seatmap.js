@@ -113,8 +113,14 @@ export function harvestSeatObjects(root, limit = 20000) {
 
 /* c8 ignore start - executes in the browser, not in Node */
 function scanSeatElements() {
+  // Never el.className: on an SVG element that is an SVGAnimatedString, which
+  // stringifies to "[object SVGAnimatedString]" and takes the seat's real
+  // classes with it. Plenty of seat maps are drawn in SVG, and a seat whose
+  // classes are lost reads as status unknown, which counts as taken.
+  const classOf = (el) => el.getAttribute('class') || '';
+
   const isSeatish = (el) => {
-    const bag = `${el.className || ''} ${el.id || ''} ` +
+    const bag = `${classOf(el)} ${el.id || ''} ` +
       `${el.getAttribute('data-testid') || ''} ${el.getAttribute('data-cy') || ''}`;
     return /seat/i.test(bag);
   };
@@ -141,7 +147,7 @@ function scanSeatElements() {
   const sectionLabel = (el) => {
     let p = el.parentElement;
     for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
-      const bag = `${p.className || ''} ${p.getAttribute('data-testid') || ''}`;
+      const bag = `${classOf(p)} ${p.getAttribute('data-testid') || ''}`;
       if (!/(category|section|tier|zone|class)/i.test(bag)) continue;
       const own = ownText(p);
       if (isName(own)) return own.split('\n')[0].trim();
@@ -175,7 +181,7 @@ function scanSeatElements() {
 
   return nodes.map((el) => {
     const r = el.getBoundingClientRect();
-    const classes = `${el.className || ''} ${el.getAttribute('data-status') || ''} ` +
+    const classes = `${classOf(el)} ${el.getAttribute('data-status') || ''} ` +
       `${el.getAttribute('data-testid') || ''}`;
     return {
       label: (el.textContent || '').trim() ||
