@@ -7,10 +7,10 @@ import {
 } from './stealth.js';
 import { buildProfile, describeProfile } from './fingerprint.js';
 import {
-  extractInitialState, analyseState, readShowtimes, pickShowNearest,
-  parseClockTime, clockLabel
+  extractInitialState, analyseState, showtimesPayload, readShowtimes,
+  showtimeSignature, verifySchedule, pickShowNearest, parseClockTime, clockLabel
 } from './extract.js';
-import { inspectSeats } from './seatmap.js';
+import { inspectSeats, brief } from './seatmap.js';
 import { formatSeatReport, rowName } from './seats.js';
 
 // The event code in this URL is the IMAX 2D event (the-odyssey-imax-2d), so a
@@ -396,7 +396,7 @@ async function fetchPage(whileOpen) {
           // is a failure to read availability, not a block - reporting it as
           // one would retry with a fresh browser against a bug that will
           // happen again, and eventually raise "BookMyShow is blocking us".
-          live = { failure: `page loaded but could not be used: ${e.message}` };
+          live = { failure: `page loaded but could not be used: ${brief(e.message)}` };
         }
       }
 
@@ -439,25 +439,27 @@ function embeddedScheduleDate(analysis) {
  */
 async function checkSeats(page, dateCode, analysis, apiUrls) {
   const scheduleDate = embeddedScheduleDate(analysis);
+  const embedded = readShowtimes(analysis.payload);
+  console.log(`   the page embeds ${embedded.length} showtime(s) for ` +
+    `${scheduleDate ?? 'a day it does not agree with'}`);
 
-  let payload = analysis.payload;
+  let shows = embedded;
   if (dateCode !== scheduleDate) {
-    // The embedded list is not this date's. Ask BookMyShow's own API from
-    // inside the loaded page - same cookies, same browser - reusing the query
-    // string the page itself used. It is usually refused for automated
-    // clients; when it is, say so plainly rather than guessing at seats.
-    const fetched = await fetchShowtimesForDate(page, apiUrls, dateCode);
+    // The embedded list is the wrong day's. Go and get the right one.
+    const fetched = await showtimesForDate(page, {
+      dateCode,
+      dateUrl: analysis.results.find((r) => r.dateCode === dateCode)?.url,
+      embedded,
+      apiUrls
+    });
     if (!fetched.ok) {
       return { ok: false, reason:
-        `the page only embeds ${scheduleDate ? `${scheduleDate}'s` : 'the selected day\'s'} ` +
-        `schedule, and asking BookMyShow for ${dateCode}'s did not work (${fetched.reason}). ` +
-        `Seats can be read once ${dateCode} is the current day.` };
+        `${dateCode}'s schedule could not be read - ${fetched.reason}` };
     }
-    payload = fetched.payload;
-    console.log(`   showtimes for ${dateCode} fetched from the site API`);
+    shows = fetched.shows;
+    console.log(`   got ${dateCode}'s schedule from the ${fetched.how}`);
   }
 
-  const shows = readShowtimes(payload);
   if (shows.length === 0) return { ok: false, reason: 'no showtimes in the page state' };
 
   const show = pickShowNearest(shows, SHOW_TIME_MINUTES, SHOW_TIME_WINDOW);
@@ -481,11 +483,100 @@ async function checkSeats(page, dateCode, analysis, apiUrls) {
 }
 
 /**
+ * Get a specific date's schedule, by whatever means the site allows.
+ *
+ * The date the checker is watching is usually not today, and the page it loads
+ * embeds today's schedule. There are three ways to the right day and none of
+ * them is reliable on its own, so all three are tried in order of how little
+ * they ask of the site:
+ *
+ *   1. the date's own page, at the URL the date strip itself points at;
+ *   2. clicking the date's chip, for when that page is built client-side;
+ *   3. the site's showtimes API, copied from a request the page made.
+ *
+ * Every answer is checked before it is believed. Being handed today's schedule
+ * again is the failure mode that matters here: it looks like success, and it
+ * would send somebody to a seat at the wrong show on the wrong day.
+ */
+async function showtimesForDate(page, { dateCode, dateUrl, embedded, apiUrls }) {
+  const tried = [];
+  const embeddedSignature = showtimeSignature(embedded);
+
+  /** Believe a payload only with positive evidence that it is the right day. */
+  const accept = (payload, how) => {
+    if (!payload) { tried.push(`${how}: no page state`); return null; }
+    const verdict = verifySchedule(payload, {
+      dateCode, referenceSignature: embeddedSignature
+    });
+    if (!verdict.ok) { tried.push(`${how}: ${verdict.reason}`); return null; }
+    return { ok: true, shows: verdict.shows, how };
+  };
+
+  const stateOfPage = async () => {
+    const parsed = extractInitialState(await page.content());
+    const found = parsed ? showtimesPayload(parsed) : { ok: false };
+    return found.ok ? found.payload : null;
+  };
+
+  // 1. The date's own page.
+  const urls = [...new Set([
+    dateUrl ? absoluteUrl(dateUrl) : null,
+    `${BASE_URL}/${dateCode}`
+  ].filter(Boolean))];
+
+  for (const url of urls) {
+    const how = url === urls[0] && dateUrl ? "date strip's own link" : 'date page';
+    try {
+      console.log(`   trying the ${how}: ${url}`);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(rand(1500, 3000));
+      const good = accept(await stateOfPage(), how);
+      if (good) return good;
+    } catch (e) {
+      tried.push(`${how}: ${brief(e.message)}`);
+    }
+  }
+
+  // 2. The chip itself, for a strip that switches dates without a page load.
+  try {
+    const chip = page.locator(
+      `[href*="${dateCode}"], [data-date="${dateCode}"], [id*="${dateCode}"]`).first();
+    if (await chip.count() > 0) {
+      await chip.click({ timeout: 10000 });
+      await page.waitForTimeout(rand(2500, 4000));
+      const good = accept(await stateOfPage(), 'date chip');
+      if (good) return good;
+    } else {
+      tried.push('date chip: not on the page');
+    }
+  } catch (e) {
+    tried.push(`date chip: ${brief(e.message)}`);
+  }
+
+  // 3. The API the page uses, with the date swapped. Usually refused for
+  // automated clients, and on a server-rendered page there may be no request
+  // to copy in the first place.
+  const api = await fetchShowtimesApi(page, apiUrls, dateCode);
+  if (api.ok) {
+    const good = accept(api.payload, 'site API');
+    if (good) return good;
+  } else {
+    tried.push(`site API: ${api.reason}`);
+  }
+
+  return { ok: false, reason: tried.join('; ') };
+}
+
+const absoluteUrl = (url) => {
+  try { return new URL(url, BASE_URL).toString(); } catch { return null; }
+};
+
+/**
  * Re-issue the page's own showtimes request for a different date, from inside
  * the page. Only the date changes; every other parameter is whatever the site
  * decided it needed, which is not something worth reverse-engineering.
  */
-async function fetchShowtimesForDate(page, apiUrls, dateCode) {
+async function fetchShowtimesApi(page, apiUrls, dateCode) {
   if (!apiUrls || apiUrls.length === 0) {
     return { ok: false, reason: 'the page made no showtimes request to copy' };
   }
@@ -636,8 +727,8 @@ async function main() {
         if (!report.ok) console.log(`   no seat recommendation: ${report.reason}`);
       } catch (e) {
         seatReports.set(needsSeats.dateCode,
-          { ok: false, reason: `seat check failed: ${e.message}` });
-        console.error(`   seat check failed: ${e.message}`);
+          { ok: false, reason: `seat check failed: ${brief(e.message)}` });
+        console.error(`   seat check failed: ${brief(e.message)}`);
       }
     }
 

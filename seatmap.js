@@ -25,6 +25,19 @@ import { buildLayout, recommendSeats } from './seats.js';
 
 const SEAT_KEY_HINT = /("seatStatus"|"SeatStatus"|"seatLayout"|"SeatLayout"|"seats"\s*:\s*\[|"seatNumber"|"SeatNsm")/;
 
+/**
+ * The readable part of an error message.
+ *
+ * Playwright attaches a call log and terminal colour codes to its errors. All
+ * of that ends up in the alert email, where the first line is the only part
+ * anybody reads and the escape codes are just noise.
+ */
+export const brief = (message) => String(message ?? '')
+  .replace(/\u001b?\[[0-9;]*m/g, '')     // with or without the escape byte
+  .split('\n')[0]
+  .trim()
+  .slice(0, 200);
+
 /** Does this JSON blob look like it contains a seat map at all? */
 const looksLikeSeatData = (text) =>
   text.length > 200 && text.length < 12_000_000 && SEAT_KEY_HINT.test(text);
@@ -332,7 +345,7 @@ export async function inspectSeats(page, show, options = {}) {
     };
   } catch (e) {
     await dump(page, debugDir, `seatmap-error-${show.label}`);
-    return { ok: false, reason: `seat layout could not be opened: ${e.message}` };
+    return { ok: false, reason: `seat layout could not be opened: ${brief(e.message)}` };
   } finally {
     page.off('response', onResponse);
   }

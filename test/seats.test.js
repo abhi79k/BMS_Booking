@@ -14,9 +14,10 @@ import {
   buildLayout, recommendSeats, interpretStatus, statusFromTokens,
   seatRange, formatSeatReport, AVAILABLE, TAKEN, UNKNOWN
 } from '../seats.js';
-import { harvestSeatObjects } from '../seatmap.js';
+import { harvestSeatObjects, brief } from '../seatmap.js';
 import {
-  parseClockTime, clockLabel, readShowtimes, pickShowNearest, readSelectedDate
+  parseClockTime, clockLabel, readShowtimes, pickShowNearest, readSelectedDate,
+  showtimeSignature, verifySchedule, analyseState
 } from '../extract.js';
 
 // --- helpers ----------------------------------------------------------------
@@ -315,6 +316,92 @@ test('the selected date in the strip is what the embedded schedule belongs to', 
   assert.equal(readSelectedDate(payload), '20260802');
 });
 
+// --- getting the right day's schedule ----------------------------------------
+//
+// The checker watches a date that is usually not today, while the page it loads
+// embeds today's schedule. Everything below guards the one failure that would
+// not look like a failure: asking for Sunday, being handed today, and
+// recommending seats at a show that has already finished.
+
+const withDate = (dateCode, sessionIds) => ({
+  strip: [{ id: dateCode, styleId: 'date-selected', isSelected: true }],
+  widgets: [{
+    venueName: 'PVR IMAX: Sathyam, Chennai',
+    shows: sessionIds.map((id, i) => ({
+      showTime: `0${7 + i}:30 PM`, sessionId: id, cta: { type: 'showtime', url: `/s/${id}` }
+    }))
+  }]
+});
+
+test('a schedule that names the day it is showing is believed', () => {
+  const v = verifySchedule(withDate('20260802', ['A1', 'A2']), { dateCode: '20260802' });
+  assert.equal(v.ok, true);
+  assert.equal(v.shows.length, 2);
+});
+
+test('a schedule showing a different day is refused', () => {
+  const v = verifySchedule(withDate('20260731', ['A1']), { dateCode: '20260802' });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /came back showing 20260731/);
+});
+
+test("today's schedule handed back for another date is refused", () => {
+  // The site answers the request for Sunday with the very sessions we already
+  // hold for today. Same sessions means same day, whatever the page claims.
+  const today = withDate('20260731', ['S1', 'S2']);
+  const reference = showtimeSignature(readShowtimes(today));
+
+  const impostor = { widgets: withDate('20260731', ['S1', 'S2']).widgets };
+  const v = verifySchedule(impostor, { dateCode: '20260802', referenceSignature: reference });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /same schedule/);
+});
+
+test('a different day with the same times but new sessions is believed', () => {
+  // Cinemas run the same times every day; only the session ids move.
+  const today = withDate('20260731', ['S1', 'S2']);
+  const reference = showtimeSignature(readShowtimes(today));
+
+  const sunday = { widgets: withDate('20260731', ['S9', 'S8']).widgets };
+  const v = verifySchedule(sunday, { dateCode: '20260802', referenceSignature: reference });
+  assert.equal(v.ok, true);
+});
+
+test('a schedule that proves nothing about its day is refused', () => {
+  const anonymous = { widgets: [{ venueName: 'X', shows: [
+    { showTime: '07:30 PM', cta: { type: 'showtime' } }
+  ] }] };
+  const v = verifySchedule(anonymous, { dateCode: '20260802' });
+  assert.equal(v.ok, false);
+  assert.match(v.reason, /proves which day/);
+});
+
+test('an empty payload is refused rather than trusted', () => {
+  assert.equal(verifySchedule(null, { dateCode: '20260802' }).ok, false);
+  assert.equal(verifySchedule({}, { dateCode: '20260802' }).ok, false);
+});
+
+test('signatures ignore a schedule with too few session ids to fingerprint', () => {
+  assert.equal(showtimeSignature([{ sessionId: 'A' }, {}, {}]), null);
+  assert.equal(showtimeSignature([{ sessionId: 'B' }, { sessionId: 'A' }]), 'A|B');
+});
+
+test('the date strip hands over each date\'s own link', () => {
+  const state = { showtimesFunctionalApi: { queries: { fetchPrimaryDynamic: { data: { data: {
+    strip: [
+      { id: '20260802', styleId: 'date-default',
+        cta: { type: 'dateSelector', url: '/movies/chennai/the-odyssey/buytickets/ET1/20260802' } },
+      { id: '20260803', styleId: 'date-default', cta: { type: 'dateSelector' } }
+    ]
+  } } } } } };
+
+  const a = analyseState(state, ['20260802', '20260803']);
+  assert.equal(a.ok, true);
+  assert.equal(a.results[0].url, '/movies/chennai/the-odyssey/buytickets/ET1/20260802');
+  assert.equal(a.results[0].onSale, true);
+  assert.equal(a.results[1].url, undefined);
+});
+
 // --- the email --------------------------------------------------------------
 
 test('the email names the seats, the show and the availability', () => {
@@ -335,6 +422,19 @@ test('the email names the seats, the show and the availability', () => {
   assert.match(text, /99 of 100 seats free \(99%\)/);
   assert.match(text, /https:\/\/in\.bookmyshow\.com\/seat\/3/);
   assert.ok(!text.includes('G5'), 'the sold seat must not be recommended');
+});
+
+test('a browser error reaches the email as one readable line', () => {
+  // Playwright errors carry a call log and colour codes. An alert that opens
+  // with a wall of escape sequences is an alert nobody reads.
+  const raw = 'page.goto: net::ERR_ABORTED\n' +
+    `Call log:\n  - [2mnavigating to "https://in.bookmyshow.com"[22m\n`;
+  const line = brief(raw);
+  assert.equal(line, 'page.goto: net::ERR_ABORTED');
+  assert.ok(!line.includes(''));
+  assert.ok(!line.includes('\n'));
+  assert.ok(brief('x'.repeat(500)).length <= 200);
+  assert.equal(brief(undefined), '');
 });
 
 test('an unreadable seat map says why, in the email', () => {

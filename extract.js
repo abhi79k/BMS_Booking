@@ -64,7 +64,16 @@ function readDateStrip(payload) {
        node.data.some((d) => /disabled/i.test(d?.styleId ?? '')));
 
     if (!dates.has(node.id)) {
-      dates.set(node.id, { dateCode: node.id, onSale: hasCta && !disabled });
+      dates.set(node.id, {
+        dateCode: node.id,
+        onSale: hasCta && !disabled,
+        // Where this chip leads. The seat check needs a date's own page and
+        // this is the site's own answer for where that is, which beats
+        // assembling a URL out of guesses.
+        url: typeof node.cta?.url === 'string' ? node.cta.url
+          : typeof node.cta?.meta?.url === 'string' ? node.cta.meta.url
+          : typeof node.url === 'string' ? node.url : undefined
+      });
     }
   }
 
@@ -106,6 +115,7 @@ export function analyseState(state, dateStrs) {
     return {
       dateCode,
       onSale: cell.onSale,
+      url: cell.url,
       note: cell.onSale ? 'ON SALE' : 'listed but not on sale'
     };
   });
@@ -229,6 +239,53 @@ export function readShowtimes(payload) {
 
   visit(payload, undefined, 0);
   return shows.sort((a, b) => a.minutes - b.minutes);
+}
+
+/**
+ * A fingerprint of a schedule, used to tell one day's from another's.
+ *
+ * Session ids are per showing, not per film or per screen, so two payloads
+ * carrying the same ids are the same day's schedule - however different the
+ * page that served them claimed to be. That is the trap this exists to catch:
+ * asking for Sunday and being handed today's list again, silently.
+ *
+ * Falls back to nothing (rather than to the times, which repeat daily) when
+ * there are no session ids to fingerprint, so the caller knows it has no
+ * evidence rather than weak evidence.
+ */
+export function showtimeSignature(shows) {
+  const ids = shows.map((s) => s.sessionId).filter(Boolean);
+  if (ids.length < Math.max(1, shows.length / 2)) return null;
+  return [...new Set(ids)].sort().join('|');
+}
+
+/**
+ * Is this payload really `dateCode`'s schedule?
+ *
+ * Asking BookMyShow for another day and being handed today's list again is the
+ * failure that matters: it looks exactly like success. So a payload is believed
+ * only on positive evidence - it says which day it is showing, or its sessions
+ * are demonstrably not the ones we already have - and refused otherwise.
+ *
+ * @param referenceSignature showtimeSignature() of the schedule already held
+ */
+export function verifySchedule(payload, { dateCode, referenceSignature }) {
+  const shows = readShowtimes(payload || {});
+  if (shows.length === 0) return { ok: false, reason: 'no showtimes in it' };
+
+  const selected = readSelectedDate(payload);
+  if (selected && selected !== dateCode) {
+    return { ok: false, reason: `came back showing ${selected}` };
+  }
+
+  const signature = showtimeSignature(shows);
+  if (signature && referenceSignature && signature === referenceSignature) {
+    return { ok: false, reason: "served the same schedule as the day already held" };
+  }
+  if (!selected && !signature) {
+    return { ok: false, reason: 'nothing in it proves which day it is' };
+  }
+  return { ok: true, shows };
 }
 
 /**

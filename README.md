@@ -53,12 +53,17 @@ Two limits are worth knowing before you rely on it:
   that needs a login, or a show not yet open for seat selection, produces an
   alert that says exactly that instead of a recommendation. The date alert
   itself is never held up by a seat check that fails.
-- **Seats can normally only be read for the current day.** BookMyShow embeds
-  only the currently selected day's schedule in the page, so a date that opens
-  a week out is alerted immediately, and its seats are reported once that day
-  arrives (the checker sends a short follow-up email at that point). The
-  checker attempts the site's own showtimes API for a future date and reports
-  honestly when that is refused, which it usually is for automated clients.
+- **Reading a future date's seats means going to that date's page.** The page
+  the checker loads embeds only the currently selected day's schedule, so for
+  any other date it goes and fetches that day's: first the link the date strip
+  itself points at, then the date's URL, then the date chip, then the site's
+  own showtimes API. Whatever comes back is checked before it is believed —
+  being handed today's schedule again is the failure that would otherwise look
+  like success, and it is caught by comparing session ids, which are unique per
+  showing. If none of the four routes produces a schedule that provably belongs
+  to the requested date, the alert says so and names what was tried, rather
+  than recommending a seat at the wrong show. Dates whose seats could not be
+  read yet get a short follow-up email once they can be.
 
 Set the SEAT_CHECK variable to 0 to skip all of this and alert on the date
 opening only.
